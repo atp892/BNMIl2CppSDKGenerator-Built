@@ -108,22 +108,55 @@ namespace Il2CppSDK
             currentFile.WriteLine("#include <BNMIncludes.hpp>");
             currentFile.WriteLine();
             indentLevel = 0;
+
+            var nsString = string.IsNullOrEmpty(clazz.Namespace) ? "GlobalNamespace" : clazz.Namespace.ToString();
+            var nsParts = nsString.Split('.', StringSplitOptions.RemoveEmptyEntries);
+
+            if (clazz.IsEnum)
+            {
+                foreach (var p in nsParts)
+                {
+                    WriteIndented($"namespace {p} {{");
+                    indentLevel++;
+                }
+                var enumName = Utils.FormatInvalidName(clazz.Name);
+                WriteIndented($"enum class {enumName} : {Utils.GetEnumType(clazz)} {{");
+                indentLevel++;
+                var enumFields = clazz.Fields.Where(f => f.IsLiteral && f.IsStatic && f.Constant?.Value != null).ToList();
+                for (int i = 0; i < enumFields.Count; i++)
+                {
+                    var comma = i == enumFields.Count - 1 ? "" : ",";
+                    WriteIndented($"{Utils.FormatInvalidName(enumFields[i].Name)} = {enumFields[i].Constant.Value}{comma}");
+                }
+                indentLevel--;
+                WriteIndented("};");
+                while (indentLevel > 0)
+                {
+                    indentLevel--;
+                    WriteIndented("}");
+                }
+                return;
+            }
+
             TypeDef baseType = clazz.BaseType?.ResolveTypeDef();
             string baseIncludeLine = "";
             string baseClassFullName = "";
 
             if (!clazz.IsStruct() && baseType != null && baseType.FullName != "System.Object")
             {
-                string baseNs = string.IsNullOrEmpty(baseType.Namespace) ? "GlobalNamespace" : baseType.Namespace.Replace(".", "::");
-                string baseName = Utils.FormatInvalidName(baseType.Name);
-                string includePath = string.IsNullOrEmpty(baseType.Namespace) ? baseName : $"{baseType.Namespace}/{baseName}.hpp";
-                baseIncludeLine = $"#include <{includePath}>";
-                baseClassFullName = $"{baseNs}::{baseName}";
+                string baseNsRaw = string.IsNullOrEmpty(baseType.Namespace) ? "GlobalNamespace" : baseType.Namespace.ToString();
+                string baseNsPath = baseNsRaw.Replace(".", "/");
+                string baseNsCpp = baseNsRaw.Replace(".", "::");
+                string baseFileName = baseType.Name.ToString().FixIl2CppName();
+                string baseNameValid = Utils.FormatInvalidName(baseType.Name);
+
+                // FIXED: Full path for base class includes
+                baseIncludeLine = $"#include <SDK/Includes/{baseNsPath}/{baseFileName}.h>";
+                baseClassFullName = $"{baseNsCpp}::{baseNameValid}";
             }
 
             if (!string.IsNullOrEmpty(baseIncludeLine)) currentFile.WriteLine(baseIncludeLine);
-            var nsString = clazz.Namespace.ToString() ?? "";
-            var nsParts = nsString.Split('.', StringSplitOptions.RemoveEmptyEntries);
+
             foreach (var p in nsParts)
             {
                 WriteIndented($"namespace {p} {{");
@@ -142,30 +175,13 @@ namespace Il2CppSDK
             indentLevel++;
             WriteIndented("public:");
             WriteIndented("static BNM::Class StaticClass() {");
-            WriteIndented($"\treturn BNM::Class(\"{nsString}\", \"{clazz.Name}\", BNM::Image(\"{clazz.Module.Name}\"));");
+            WriteIndented($"\treturn BNM::Class(\"{(nsString == "GlobalNamespace" ? "" : nsString)}\", \"{clazz.Name}\", BNM::Image(\"{clazz.Module.Name}\"));");
             WriteIndented("}");
             WriteIndented("");
 
-            if (clazz.IsEnum)
-            {
-                WriteIndented($"enum class {validClassName} : {Utils.GetEnumType(clazz)}");
-                WriteIndented("{");
-                indentLevel++;
-                var enumFields = clazz.Fields.Where(f => f.IsLiteral && f.IsStatic && f.Constant?.Value != null).ToList();
-                for (int i = 0; i < enumFields.Count; i++)
-                {
-                    var comma = i == enumFields.Count - 1 ? "" : ",";
-                    WriteIndented($"{Utils.FormatInvalidName(enumFields[i].Name)} = {enumFields[i].Constant.Value}{comma}");
-                }
-                indentLevel--;
-                WriteIndented("};");
-            }
-            else
-            {
-                ParseFields(clazz);
-                WriteIndented("");
-                ParseMethods(clazz);
-            }
+            ParseFields(clazz);
+            WriteIndented("");
+            ParseMethods(clazz);
 
             indentLevel--;
             WriteIndented("};");
@@ -190,23 +206,21 @@ namespace Il2CppSDK
                     continue;
 
                 var namespaze = type.Namespace.Replace("<", "").Replace(">", "");
+                if (string.IsNullOrEmpty(namespaze)) namespaze = "GlobalNamespace";
+
                 var className = rawTypeName.FixIl2CppName();
                 var classFilename = string.Concat(className.Split(Path.GetInvalidFileNameChars()));
 
-                string key = namespaze.Length > 0 ? namespaze : "-";
-                string include = namespaze.Length > 0 
-                    ? $"#include \"Includes/{namespaze}/{classFilename}.h\"" 
-                    : $"#include \"Includes/{classFilename}.h\"";
+                // FIXED: Full path for master namespace includes
+                string include = $"#include <SDK/Includes/{namespaze.Replace(".", "/")}/{classFilename}.h>";
 
-                if (!namespaceIncludes.ContainsKey(key))
-                    namespaceIncludes[key] = new List<string>();
+                if (!namespaceIncludes.ContainsKey(namespaze))
+                    namespaceIncludes[namespaze] = new List<string>();
 
-                if (!namespaceIncludes[key].Contains(include))
-                    namespaceIncludes[key].Add(include);
+                if (!namespaceIncludes[namespaze].Contains(include))
+                    namespaceIncludes[namespaze].Add(include);
 
-                string outputPath = Path.Combine(OUTPUT_DIR, "Includes");
-                if (namespaze.Length > 0) outputPath = Path.Combine(outputPath, namespaze);
-                
+                string outputPath = Path.Combine(OUTPUT_DIR, "Includes", namespaze.Replace(".", "/"));
                 if (!Directory.Exists(outputPath)) Directory.CreateDirectory(outputPath);
 
                 string fullFilePath = Path.Combine(outputPath, classFilename + ".h");
