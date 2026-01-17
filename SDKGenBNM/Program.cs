@@ -1,362 +1,174 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.IO;
 using dnlib.DotNet;
-using dnlib.IO;
-using dnlib.Utils;
-using System.Text.RegularExpressions;
-using System.Collections;
 
 namespace Il2CppSDK
 {
+    static class UtilThing
+    {
+        public const string allowedChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWYZ1234567890_";
+        public static string FixIl2CppName(this string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "_";
+            string result = "";
+            bool isIntStarted = char.IsDigit(name[0]);
+
+            if (isIntStarted) result = "_";
+            for (int i = 0; i < name.Length; ++i)
+            {
+                if (!allowedChars.Contains(name[i]))
+                    result += "$";
+                else
+                    result += name[i];
+            }
+            return result;
+        }
+    }
+
     class Program
     {
-        static Dictionary<string, int> m_DuplicateMethodTable = new Dictionary<string, int>();
+        static Dictionary<string, int> m_DuplicateMethodTable = new();
+        static Dictionary<string, List<string>> namespaceIncludes = new();
         static string OUTPUT_DIR = "SDK";
-        static ModuleDefMD currentModule = null;
-        static StreamWriter currentFile = null;
-        static int indentLevel = 0;
+        static ModuleDefMD currentModule;
+        static StreamWriter currentFile;
+        static int indentLevel;
+
+        static void WriteIndented(string line, bool write = false)
+        {
+            string indent = new string('\t', indentLevel);
+            if (write) currentFile.Write(indent + line);
+            else currentFile.WriteLine(indent + line);
+        }
 
         static void ParseFields(TypeDef clazz)
         {
-            if (clazz.IsStruct())
+            foreach (var field in clazz.Fields)
             {
-                foreach (var rid in currentModule.Metadata.GetFieldRidList(clazz.Rid))
-                {
-                    var field = currentModule.ResolveField(rid);
-
-                    if (field == null)
-                    {
-                        continue;
-                    }
-
-                    var fieldName = field.Name.Replace("::", "_").Replace("<", "$").Replace(">", "$").Replace("k__BackingField", "").Replace(".", "_").Replace("`", "_");
-
-                    if (fieldName.Equals("auto") || fieldName.Equals("register"))
-                        fieldName += "_";
-
-                    var fieldType = Utils.Il2CppTypeToCppType(field.FieldSig.GetFieldType(), clazz);
-
-                    WriteIndented($"{(field.IsStatic ? "static " : "")}{fieldType} {Utils.FormatInvalidName(fieldName)};");
-                }
-                return;
-            }
-
-            foreach (var rid in currentModule.Metadata.GetFieldRidList(clazz.Rid))
-            {
-                var field = currentModule.ResolveField(rid);
-
-                if (field == null)
-                {
-                    continue;
-                }
-
-                var fieldName = field.Name.Replace("::", "_").Replace("<", "$").Replace(">", "$").Replace("k__BackingField", "").Replace(".", "_").Replace("`", "_");
-
-                if (fieldName.Equals("auto") || fieldName.Equals("register"))
-                    fieldName += "_";
-
+                if (field.IsLiteral) continue;
+                var fieldName = field.Name.ToString().FixIl2CppName();
+                if (fieldName == "auto" || fieldName == "register") fieldName += "_";
                 var fieldType = Utils.Il2CppTypeToCppType(field.FieldType, clazz);
-
-                //get
-
-                WriteIndented(string.Format("/* @brief Orig Type: {0} */", field.FieldType.FullName));
-                WriteIndented(string.Format("template <typename T = {0}>", fieldType), true);
-                currentFile.WriteLine(string.Format(" {0}{1} {2}() {{", (field.IsStatic ? "static " : ""), "T", Utils.FormatInvalidName(fieldName)));
-                if (field.IsStatic)
-                {
-                    WriteIndented(string.Format("\tstatic BNM::Field<{0}> __bnm__field__ = StaticClass().GetField(\"{1}\");", "T", fieldName));
-                    WriteIndented("\treturn __bnm__field__();");
-                }
-                else
-                {
-                    WriteIndented(string.Format("\tstatic BNM::Field<{0}> __bnm__field__ = StaticClass().GetField(\"{1}\");", "T", fieldName));
-                    WriteIndented("\t__bnm__field__.SetInstance((BNM::IL2CPP::Il2CppObject*)this);");
-                    WriteIndented("\treturn __bnm__field__();");
-                }
+                WriteIndented($"template <typename T = {fieldType}>", true);
+                currentFile.WriteLine($" {(field.IsStatic ? "static " : "")}T {Utils.FormatInvalidName(fieldName)}() {{");
+                WriteIndented($"\tstatic BNM::Field<T> __bnm__field__ = StaticClass().GetField(\"{fieldName}\");");
+                if (!field.IsStatic) WriteIndented("\t__bnm__field__.SetInstance((BNM::IL2CPP::Il2CppObject*)this);");
+                WriteIndented("\treturn __bnm__field__();");
                 WriteIndented("}");
-
-                // set
-                WriteIndented(string.Format("/* @param {0} Orig Type: {1} */", "value", field.FieldType.FullName));
-                WriteIndented(string.Format("{0}{1} set_{2}({3}) {{", (field.IsStatic ? "static " : ""), "void", Utils.FormatInvalidName(fieldName), fieldType + " value"));
-                if (field.IsStatic)
-                {
-                    WriteIndented(string.Format("\tstatic BNM::Field<{0}> __bnm__field__ = StaticClass().GetField(\"{1}\");", fieldType, fieldName));
-                    WriteIndented("\t__bnm__field__.Set(value);");
-                }
-                else
-                {
-                    WriteIndented(string.Format("\tstatic BNM::Field<{0}> __bnm__field__ = StaticClass().GetField(\"{1}\");", fieldType, fieldName));
-                    WriteIndented("\t__bnm__field__.SetInstance((BNM::IL2CPP::Il2CppObject*)this);");
-                    WriteIndented("\t__bnm__field__.Set(value);");
-                }
+                WriteIndented($"{(field.IsStatic ? "static " : "")}void set_{Utils.FormatInvalidName(fieldName)}({fieldType} value) {{");
+                WriteIndented($"\tstatic BNM::Field<{fieldType}> __bnm__field__ = StaticClass().GetField(\"{fieldName}\");");
+                if (!field.IsStatic) WriteIndented("\t__bnm__field__.SetInstance((BNM::IL2CPP::Il2CppObject*)this);");
+                WriteIndented("\t__bnm__field__.Set(value);");
                 WriteIndented("}");
             }
         }
-        
+
         static void ParseMethods(TypeDef clazz)
         {
-            if (clazz.IsStruct())
+            if (clazz.IsStruct()) return;
+            foreach (var method in clazz.Methods)
             {
-                return;
-            }
-
-            foreach (var rid in currentModule.Metadata.GetMethodRidList(clazz.Rid))
-            {
-                var method = currentModule.ResolveMethod(rid);
-
-                if (method == null || method.IsConstructor || method.IsStaticConstructor)
+                if (method.IsConstructor || method.IsStaticConstructor) continue;
+                var methodName = method.Name.ToString().FixIl2CppName();
+                if (methodName == "auto" || methodName == "register") methodName += "_";
+                var returnType = Utils.Il2CppTypeToCppType(method.ReturnType, clazz);
+                var key = clazz.FullName + method.Name;
+                if (m_DuplicateMethodTable.ContainsKey(key)) methodName += "_" + m_DuplicateMethodTable[key]++;
+                else m_DuplicateMethodTable[key] = 1;
+                var paramTypes = new List<string>();
+                var paramNames = new List<string>();
+                foreach (var p in method.Parameters.Where(p => p.IsNormalMethodParameter))
                 {
-                    continue;
+                    var t = Utils.Il2CppTypeToCppType(p.Type, clazz);
+                    var paramTypeDef = p.Type.ToTypeDefOrRef()?.ResolveTypeDef();
+                    if (paramTypeDef != null && paramTypeDef.IsEnum) t = Utils.GetEnumType(paramTypeDef);
+                    if (paramTypeDef != null && paramTypeDef.TryGetGenericInstSig() != null) t = "void*";
+                    var n = p.Name;
+                    if (n == "auto" || n == "register") n += "_";
+                    if (p.HasParamDef && p.ParamDef.IsOut) t += "*";
+                    paramTypes.Add(t);
+                    paramNames.Add(n);
                 }
-
-                var methodName = method.Name.Replace("::", "_").Replace("<", "").Replace(">", "").Replace(".", "_").Replace("`", "_");
-
-                if (methodName.Equals("auto") || methodName.Equals("register"))
-                    methodName += "_";
-
-                var methodType = Utils.Il2CppTypeToCppType(method.ReturnType, clazz);
-
-                string methodKey = clazz.Namespace + clazz.FullName + method.Name;
-
-                if (m_DuplicateMethodTable.ContainsKey(methodKey))
-                {
-                    methodName += "_" + m_DuplicateMethodTable[methodKey]++;
-                }
-                else
-                {
-                    m_DuplicateMethodTable.Add(methodKey, 1);
-                }
-
-                List<string> methodParams = new List<string>();
-                List<string> paramTypes = new List<string>();
-                List<string> paramNames = new List<string>();
-
-                foreach (var param in method.Parameters)
-                {
-                    if (param.IsNormalMethodParameter)
-                    {
-                        var paramTypeDef = param.Type.ToTypeDefOrRef().ResolveTypeDef();
-                        var paramType = Utils.Il2CppTypeToCppType(param.Type, clazz);
-
-                        if (paramTypeDef != null && paramTypeDef.IsEnum)
-                        {
-                            paramType = Utils.GetEnumType(paramTypeDef);
-                        }
-                        
-                        if (paramTypeDef != null && paramTypeDef.TryGetGenericInstSig() != null)
-                        {
-                            paramType = "void*";
-                        }
-
-                        if (param.HasParamDef && param.ParamDef.IsOut)
-                            paramType += "*";
-
-                        var originalName = param.Name;
-                        if (originalName == "auto" || originalName == "register")
-                            originalName += "_";
-
-                        paramTypes.Add(paramType);
-                        paramNames.Add(originalName);
-                    }
-                }
-
-                paramNames = Utils.MakeValidParams(paramNames.ToArray()).ToList();
-
-                for (int i = 0; i < paramNames.Count; i++)
-                {
-                    methodParams.Add(paramTypes[i] + " " + Utils.FormatInvalidName(paramNames[i]));
-                }
-
-                WriteIndented(string.Format("/* @brief Orig Type: {0} */", method.ReturnType.FullName));
-                WriteIndented(string.Format("template <typename T = {0}>", methodType), true);
-                currentFile.WriteLine(string.Format(" {0}{1} {2}({3}) {{",
-                    method.IsStatic ? "static " : "", "T", Utils.FormatInvalidName(methodName), string.Join(", ", methodParams)));
-
-                if ((method.Attributes & MethodAttributes.PinvokeImpl) != 0 || (method.ImplAttributes & MethodImplAttributes.InternalCall) != 0)
-                {
-                    string paramList = string.Join(", ", paramTypes);
-                    string paramCall = string.Join(", ", paramNames.Select(Utils.FormatInvalidName));
-
-                    if (!method.IsStatic)
-                    {
-                        if (!string.IsNullOrWhiteSpace(paramList))
-                            paramList = "BNM::IL2CPP::Il2CppObject*, " + paramList;
-                        else
-                            paramList = "BNM::IL2CPP::Il2CppObject*";
-
-                        if (!string.IsNullOrWhiteSpace(paramCall))
-                            paramCall = "(BNM::IL2CPP::Il2CppObject*)this, " + paramCall;
-                        else
-                            paramCall = "(BNM::IL2CPP::Il2CppObject*)this";
-                    }
-
-                    WriteIndented(string.Format("\tstatic auto __bnm__method__ = ({0}(*)({1}))BNM::GetExternMethod(\"{2}::{3}::{4}\");",
-                        "T", paramList, clazz.Namespace, clazz.Name, method.Name));
-
-                    WriteIndented(string.Format("\treturn (T)__bnm__method__({0});", paramCall));
-                }
-                else
-                {
-                    if (!method.IsStatic)
-                    {
-                        WriteIndented(string.Format("\tstatic BNM::Method<T> __bnm__method__ = StaticClass().GetMethod(\"{0}\", {1});", method.Name, methodParams.Count));
-
-                        WriteIndented("\treturn __bnm__method__[(BNM::IL2CPP::Il2CppObject*)this](", true);
-                        currentFile.Write(string.Join(", ", paramNames.Select(x => Utils.FormatInvalidName(x))));
-                        currentFile.WriteLine(");");
-                    }
-                    else
-                    {
-                        WriteIndented(string.Format("\tstatic BNM::Method<T> __bnm__method__ = StaticClass().GetMethod(\"{0}\", {1});", method.Name, methodParams.Count));
-
-                        WriteIndented("\treturn __bnm__method__(", true);
-                        currentFile.Write(string.Join(", ", paramNames.Select(x => Utils.FormatInvalidName(x))));
-                        currentFile.WriteLine(");");
-                    }
-                }
-
-                
+                WriteIndented($"template <typename T = {returnType}>", true);
+                currentFile.WriteLine($" {(method.IsStatic ? "static " : "")}T {Utils.FormatInvalidName(methodName)}({string.Join(", ", paramTypes.Zip(paramNames, (t, n) => $"{t} {Utils.FormatInvalidName(n)}"))}) {{");
+                WriteIndented($"\tstatic BNM::Method<T> __bnm__method__ = StaticClass().GetMethod(\"{method.Name}\", {paramNames.Count});");
+                if (!method.IsStatic) WriteIndented("\treturn __bnm__method__[(BNM::IL2CPP::Il2CppObject*)this](", true);
+                else WriteIndented("\treturn __bnm__method__(", true);
+                currentFile.Write(string.Join(", ", paramNames.Select(Utils.FormatInvalidName)));
+                currentFile.WriteLine(");");
                 WriteIndented("}");
             }
         }
-        
-        static void WriteIndented(string line, bool isWrite = false)
-        {
-            if (isWrite)
-                currentFile.Write(new string('\t', indentLevel) + line);
-            else
-                currentFile.WriteLine(new string('\t', indentLevel) + line);
-        }
+
         static void ParseClass(TypeDef clazz)
         {
-            var module = clazz.Module;
-            var namespaze = clazz.Namespace;
-            var className = (string)clazz.Name;
-            var classFilename = string.Concat(className.Split(Path.GetInvalidFileNameChars()));
-            var validClassname = Utils.FormatInvalidName(className);
-
             currentFile.WriteLine("#pragma once");
             currentFile.WriteLine("#include <BNMIncludes.hpp>");
             currentFile.WriteLine();
-
-            if (clazz.IsEnum)
-            {
-                var enumFields = clazz.Fields
-                    .Where(f => f.IsLiteral && f.Constant?.Value != null && f.IsStatic)
-                    .ToList();
-
-                for (int i = 0; i < enumFields.Count; i++)
-                {
-                    currentFile.WriteLine("#undef " + Utils.FormatInvalidName(enumFields[i].Name));
-                }
-            }
-
             indentLevel = 0;
+            TypeDef baseType = clazz.BaseType?.ResolveTypeDef();
+            string baseIncludeLine = "";
+            string baseClassFullName = "";
 
-            string[] nameSpaceSplit = namespaze.ToString().Split('.');
-            if (nameSpaceSplit.Length == 0 || (nameSpaceSplit.Length == 1 && nameSpaceSplit[0] == ""))
+            if (!clazz.IsStruct() && baseType != null && baseType.FullName != "System.Object")
             {
-                WriteIndented("namespace GlobalNamespace {");
+                string baseNs = string.IsNullOrEmpty(baseType.Namespace) ? "GlobalNamespace" : baseType.Namespace.Replace(".", "::");
+                string baseName = Utils.FormatInvalidName(baseType.Name);
+                string includePath = string.IsNullOrEmpty(baseType.Namespace) ? baseName : $"{baseType.Namespace}/{baseName}.hpp";
+                baseIncludeLine = $"#include <{includePath}>";
+                baseClassFullName = $"{baseNs}::{baseName}";
+            }
+
+            if (!string.IsNullOrEmpty(baseIncludeLine)) currentFile.WriteLine(baseIncludeLine);
+            var nsString = clazz.Namespace.ToString() ?? "";
+            var nsParts = nsString.Split('.', StringSplitOptions.RemoveEmptyEntries);
+            foreach (var p in nsParts)
+            {
+                WriteIndented($"namespace {p} {{");
                 indentLevel++;
             }
-            else
+
+            var validClassName = Utils.FormatInvalidName(clazz.Name);
+            if (!clazz.IsStruct())
             {
-                foreach (var part in nameSpaceSplit)
-                {
-                    WriteIndented("namespace " + part + " {");
-                    indentLevel++;
-                }
+                if (!string.IsNullOrEmpty(baseClassFullName)) WriteIndented($"class {validClassName} : public {baseClassFullName}");
+                else WriteIndented($"class {validClassName} : public BNM::IL2CPP::Il2CppObject");
             }
+            else WriteIndented($"struct {validClassName}");
 
-            if (clazz.IsEnum)
-            {
-                string type = Utils.GetEnumType(clazz);
-
-                WriteIndented($"enum class {validClassname} : {type}");
-                WriteIndented("{");
-                indentLevel++;
-
-                var enumFields = clazz.Fields
-                    .Where(f => f.IsLiteral && f.Constant?.Value != null && f.IsStatic)
-                    .ToList();
-
-                for (int i = 0; i < enumFields.Count; i++)
-                {
-                    var field = enumFields[i];
-                    var comma = i == enumFields.Count - 1 ? "" : ",";
-                    WriteIndented($"{Utils.FormatInvalidName(field.Name)} = {field.Constant.Value}{comma}");
-                }
-
-                indentLevel--;
-                WriteIndented("};");
-
-                while (indentLevel > 0)
-                {
-                    indentLevel--;
-                    WriteIndented("}");
-                }
-
-                return;
-            }
-
-            if (clazz.IsSealed && clazz.IsAbstract)
-            {
-                WriteIndented("class " + validClassname);
-                currentFile.WriteLine();
-                WriteIndented("{");
-                indentLevel++;
-                WriteIndented("public:");
-            }
-            else
-            {
-                WriteIndented((clazz.IsStruct() ? "struct " : "class ") + validClassname, true);
-
-                if (!clazz.IsStruct())
-                {
-                    if (clazz.BaseType != null)
-                    {
-                        if (clazz.BaseType.FullName == "UnityEngine.MonoBehaviour")
-                        {
-                            currentFile.WriteLine(" : public BNM::UnityEngine::MonoBehaviour");
-                        }
-                        else
-                        {
-                            currentFile.WriteLine(" : public BNM::IL2CPP::Il2CppObject");
-                        }
-                    }
-                    else
-                    {
-                        currentFile.WriteLine();
-                    }
-                }
-                else
-                {
-                    currentFile.WriteLine();
-                }
-
-                WriteIndented("{");
-                indentLevel++;
-
-                if (!clazz.IsStruct()) WriteIndented("public:");
-            }
-
+            WriteIndented("{");
+            indentLevel++;
+            WriteIndented("public:");
             WriteIndented("static BNM::Class StaticClass() {");
-            WriteIndented(string.Format("\treturn BNM::Class(\"{0}\", \"{1}\", BNM::Image(\"{2}\"));", namespaze, className, module.Name));
+            WriteIndented($"\treturn BNM::Class(\"{nsString}\", \"{clazz.Name}\", BNM::Image(\"{clazz.Module.Name}\"));");
             WriteIndented("}");
             WriteIndented("");
 
-            ParseFields(clazz);
-            WriteIndented("");
-            ParseMethods(clazz);
-            WriteIndented("");
+            if (clazz.IsEnum)
+            {
+                WriteIndented($"enum class {validClassName} : {Utils.GetEnumType(clazz)}");
+                WriteIndented("{");
+                indentLevel++;
+                var enumFields = clazz.Fields.Where(f => f.IsLiteral && f.IsStatic && f.Constant?.Value != null).ToList();
+                for (int i = 0; i < enumFields.Count; i++)
+                {
+                    var comma = i == enumFields.Count - 1 ? "" : ",";
+                    WriteIndented($"{Utils.FormatInvalidName(enumFields[i].Name)} = {enumFields[i].Constant.Value}{comma}");
+                }
+                indentLevel--;
+                WriteIndented("};");
+            }
+            else
+            {
+                ParseFields(clazz);
+                WriteIndented("");
+                ParseMethods(clazz);
+            }
 
             indentLevel--;
             WriteIndented("};");
-
             while (indentLevel > 0)
             {
                 indentLevel--;
@@ -364,95 +176,82 @@ namespace Il2CppSDK
             }
         }
 
-
         static void ParseClasses()
         {
-            if (currentModule == null)
-                return;
+            if (currentModule == null) return;
 
-            foreach(var rid in currentModule.Metadata.GetTypeDefRidList())
+            foreach (var rid in currentModule.Metadata.GetTypeDefRidList())
             {
                 var type = currentModule.ResolveTypeDef(rid);
+                if (type == null) continue;
 
-                if (type == null)
+                string rawTypeName = type.Name.ToString();
+                if (rawTypeName.StartsWith("<Module>") || rawTypeName.StartsWith("<PrivateImplementationDetails>"))
                     continue;
 
-                var module = type.Module;
                 var namespaze = type.Namespace.Replace("<", "").Replace(">", "");
-                var className = (string)type.Name.Replace("<", "").Replace(">", "");
+                var className = rawTypeName.FixIl2CppName();
                 var classFilename = string.Concat(className.Split(Path.GetInvalidFileNameChars()));
-                var validClassname = Utils.FormatInvalidName(className);
 
-                string outputPath = OUTPUT_DIR;
+                string key = namespaze.Length > 0 ? namespaze : "-";
+                string include = namespaze.Length > 0 
+                    ? $"#include \"Includes/{namespaze}/{classFilename}.h\"" 
+                    : $"#include \"Includes/{classFilename}.h\"";
 
-                if (!Directory.Exists(outputPath))
-                    Directory.CreateDirectory(outputPath);
+                if (!namespaceIncludes.ContainsKey(key))
+                    namespaceIncludes[key] = new List<string>();
 
-                if (namespaze.Length > 0)
-                {
-                    File.AppendAllText(outputPath + "/" + namespaze + ".h", string.Format("#include \"Includes/{0}/{1}.h\"\r\n", namespaze, classFilename));
-                }
-                else
-                {
-                    File.AppendAllText(outputPath + "/-.h", string.Format("#include \"Includes/{0}.h\"\r\n", classFilename));
-                }
+                if (!namespaceIncludes[key].Contains(include))
+                    namespaceIncludes[key].Add(include);
 
-                outputPath += "/Includes";
+                string outputPath = Path.Combine(OUTPUT_DIR, "Includes");
+                if (namespaze.Length > 0) outputPath = Path.Combine(outputPath, namespaze);
+                
+                if (!Directory.Exists(outputPath)) Directory.CreateDirectory(outputPath);
 
-                if(namespaze.Length > 0)
-                {
-                    outputPath += "/" + namespaze;
-                }
-
-                if (!Directory.Exists(outputPath))
-                    Directory.CreateDirectory(outputPath);
-
-                outputPath += "/" + classFilename + ".h";
-
-                currentFile = new StreamWriter(outputPath);
-
+                string fullFilePath = Path.Combine(outputPath, classFilename + ".h");
+                currentFile = new StreamWriter(fullFilePath);
                 ParseClass(type);
                 currentFile.Close();
             }
         }
-        
-        static void ParseModule(string moduleFile)
+
+        static void WriteAllNamespaceHeaderFiles()
         {
-            Console.WriteLine("Generating SDK for {0}...", Path.GetFileName(moduleFile));
+            foreach (var kvp in namespaceIncludes)
+            {
+                string path = Path.Combine(OUTPUT_DIR, kvp.Key + ".h");
+                File.WriteAllLines(path, kvp.Value);
+            }
+        }
 
-            ModuleContext modCtx = ModuleDef.CreateModuleContext();
-            currentModule = ModuleDefMD.Load(moduleFile, modCtx);
-
-            string moduleOutput = OUTPUT_DIR;
-
-            if (!Directory.Exists(moduleOutput))
-                Directory.CreateDirectory(moduleOutput);
-
+        static void ParseModule(string path)
+        {
+            var ctx = ModuleDef.CreateModuleContext();
+            currentModule = ModuleDefMD.Load(path, ctx);
             ParseClasses();
         }
-        
+
         static void Main(string[] args)
         {
-            if(args.Length < 1)
-            {
-                Console.WriteLine("Invalid Arguments!");
-                return;
-            }
+            if (args.Length < 1) return;
 
             if (Directory.Exists(OUTPUT_DIR))
                 Directory.Delete(OUTPUT_DIR, true);
 
+            Directory.CreateDirectory(OUTPUT_DIR);
+
             if (Directory.Exists(args[0]))
             {
-                foreach(var file in Directory.GetFiles(args[0]))
-                {
-                    ParseModule(file);
-                }
+                foreach (var f in Directory.GetFiles(args[0], "*.dll"))
+                    ParseModule(f);
             }
             else
             {
                 ParseModule(args[0]);
             }
+
+            WriteAllNamespaceHeaderFiles();
         }
     }
 }
