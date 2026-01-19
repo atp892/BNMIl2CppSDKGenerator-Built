@@ -1,5 +1,5 @@
 # Il2CppSDKGenerator
-An Il2Cpp SDK generator for Android (And probably IOS)
+A ByNameModding Il2Cpp SDK generator for Android, Built for you.
 
 # How to use
 1. Compile Il2CppSDK generator (or use release version)
@@ -15,6 +15,8 @@ Done!
 You can include an namespace header to compile whole classes within a namespace or just compile a single class, for example take a look at SDK result.
 
 Please read how to Initialize Il2Cpp Functions first before using any of the SDK/Il2Cpp Functions.
+
+FULL CREDITS TO PUBERT AND EVERYONE WHO WORKED ON THIS BEFORE PUBERT.
 
 **Example:**
 ```c++
